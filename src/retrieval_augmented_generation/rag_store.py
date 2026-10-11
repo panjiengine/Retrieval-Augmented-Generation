@@ -210,3 +210,28 @@ class RagStore:
         except Exception:
             out["pdf_exists"] = False
         return out
+
+
+def _cli() -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Bangun vector store RAG dari PDF")
+    parser.add_argument("pdf", help='path PDF sumber, contoh: jurnal/new.pdf')
+    parser.add_argument("--force", action="store_true", help="embed ulang dari nol, abaikan cache")
+    parser.add_argument("--test", default="", help='uji retrieval setelah build, contoh: --test "fault location"')
+    args = parser.parse_args()
+
+    store = RagStore()
+    store.pdf_path = args.pdf
+    stats = store.build(force=args.force)
+    print(f"SELESAI: {stats['num_chunks']} chunks, {stats['num_pages']} halaman, "
+          f"dimensi {stats['dimension']} [{stats['pdf_path']}]", flush=True)
+
+    if args.test:
+        for i, r in enumerate(store.search(args.test, k=3), start=1):
+            snippet = r["text"][:180].replace("\n", " ")
+            print(f"  [{i}] skor={r['score']:.4f} hal.{r['page']}: {snippet}...", flush=True)
+
+
+if __name__ == "__main__":
+    _cli()
