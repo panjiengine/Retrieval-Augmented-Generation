@@ -1,4 +1,4 @@
-"""Core RAG logic: PDF -> chunks -> embeddings (llama-server) -> Qdrant.
+"""Core RAG logic: PDF -> chunks -> embeddings (llama-server) -> FAISS.
 
 Dipakai oleh MCP server. Diadaptasi dari rag-document.ipynb.
 """
@@ -10,10 +10,10 @@ import os
 import threading
 from pathlib import Path
 
+import faiss
 import numpy as np
 import pymupdf
 import requests
-from qdrant_client import QdrantClient, models
 
 # --- Konfigurasi via env ---
 PROJECT_ROOT = Path(__file__).resolve().parents[2] if len(Path(__file__).resolve().parents) >= 3 else Path.cwd()
@@ -35,10 +35,6 @@ CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "1000"))
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "150"))
 EMBED_BATCH = int(os.getenv("EMBED_BATCH", "16"))
 CACHE_DIR = Path(os.getenv("RAG_CACHE_DIR", str(PROJECT_ROOT / ".rag_cache")))
-QDRANT_URL = os.getenv("QDRANT_URL", "")  # jika diisi -> mode server, contoh http://localhost:6333
-QDRANT_PATH = os.getenv("QDRANT_PATH", str(PROJECT_ROOT / ".qdrant"))  # mode lokal persisten
-QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "rag-docs")
-UPSERT_BATCH = int(os.getenv("UPSERT_BATCH", "64"))
 
 
 def make_chunks(pages: list[dict], chunk_size: int = 1000, overlap: int = 150) -> list[dict]:
@@ -68,8 +64,15 @@ def embed_texts(texts: list[str], api_url: str = EMBED_API_URL, batch_size: int 
     return np.asarray(all_vectors, dtype=np.float32)
 
 
+def _build_faiss(embeddings: np.ndarray) -> faiss.IndexFlatIP:
+    faiss.normalize_L2(embeddings)
+    index = faiss.IndexFlatIP(int(embeddings.shape[1]))
+    index.add(embeddings)
+    return index
+
+
 class RagStore:
-    """Singleton store: PDF -> Qdrant (lokal persisten / server) + cache disk."""
+    """Singleton store: load PDF sekali, simpan FAISS index di memori + cache disk."""
 
     _instance: "RagStore | None" = None
     _lock = threading.Lock()
@@ -77,13 +80,12 @@ class RagStore:
     def __init__(self) -> None:
         self.pdf_path = PDF_PATH
         self.api_url = EMBED_API_URL
-        self.collection = QDRANT_COLLECTION
         self.chunks: list[dict] = []
+        self.index: faiss.IndexFlatIP | None = None
         self.dimension: int = 0
         self.num_pages: int = 0
         self._built = False
         self._build_lock = threading.Lock()
-        self._client: QdrantClient | None = None
 
     @classmethod
     def get(cls) -> "RagStore":
@@ -93,76 +95,42 @@ class RagStore:
                     cls._instance = cls()
         return cls._instance
 
-    def _client_or_create(self) -> QdrantClient:
-        if self._client is None:
-            if QDRANT_URL:
-                self._client = QdrantClient(url=QDRANT_URL)
-            else:
-                Path(QDRANT_PATH).mkdir(parents=True, exist_ok=True)
-                self._client = QdrantClient(path=QDRANT_PATH)
-        return self._client
-
-    # -- cache helpers (chunks + embeddings mentah, agar migrasi tak perlu re-embed) --
+    # -- cache helpers --
     def _cache_key(self) -> str:
         p = Path(self.pdf_path)
         mtime = str(p.stat().st_mtime) if p.exists() else "missing"
         raw = f"{p.resolve()}|{mtime}|{CHUNK_SIZE}|{CHUNK_OVERLAP}|{self.api_url}"
         return hashlib.md5(raw.encode()).hexdigest()[:12]
 
-    def _cache_files(self) -> tuple[Path, Path, Path]:
+    def _cache_files(self) -> tuple[Path, Path, Path, Path]:
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         key = self._cache_key()
         return (
             CACHE_DIR / f"chunks-{key}.json",
             CACHE_DIR / f"embeddings-{key}.npy",
             CACHE_DIR / f"meta-{key}.json",
+            CACHE_DIR / f"faiss-{key}.index",
         )
-
-    def _read_cache(self) -> tuple[list[dict], np.ndarray, dict] | None:
-        chunk_file, emb_file, meta_file = self._cache_files()
-        if not (chunk_file.exists() and emb_file.exists() and meta_file.exists()):
-            return None
-        try:
-            chunks = json.loads(chunk_file.read_text(encoding="utf-8"))
-            embeddings = np.load(str(emb_file))
-            meta = json.loads(meta_file.read_text(encoding="utf-8"))
-            return chunks, embeddings, meta
-        except Exception:
-            return None
-
-    def _collection_count(self) -> int | None:
-        try:
-            return self._client_or_create().count(self.collection, exact=True).count
-        except Exception:
-            return None
-
-    def _ensure_collection(self, dimension: int, recreate: bool = False) -> None:
-        client = self._client_or_create()
-        if recreate and client.collection_exists(self.collection):
-            client.delete_collection(self.collection)
-        if not client.collection_exists(self.collection):
-            client.create_collection(
-                self.collection,
-                vectors_config=models.VectorParams(size=dimension, distance=models.Distance.COSINE),
-            )
-
-    def _upsert(self, embeddings: np.ndarray) -> None:
-        client = self._client_or_create()
-        points = [
-            models.PointStruct(id=i, vector=vec.tolist(), payload={"page": self.chunks[i]["page"], "text": self.chunks[i]["text"]})
-            for i, vec in enumerate(embeddings)
-        ]
-        for start in range(0, len(points), UPSERT_BATCH):
-            client.upsert(self.collection, points=points[start : start + UPSERT_BATCH])
 
     def build(self, force: bool = False) -> dict:
         with self._build_lock:
             if self._built and not force:
                 return self.stats()
-            chunk_file, emb_file, meta_file = self._cache_files()
-            cached = None if force else self._read_cache()
+            chunk_file, emb_file, meta_file, index_file = self._cache_files()
 
-            if cached is None:
+            embeddings: np.ndarray | None = None
+            if not force and chunk_file.exists() and emb_file.exists() and meta_file.exists():
+                try:
+                    self.chunks = json.loads(chunk_file.read_text(encoding="utf-8"))
+                    embeddings = np.load(str(emb_file))
+                    meta = json.loads(meta_file.read_text(encoding="utf-8"))
+                    self.dimension = int(embeddings.shape[1])
+                    self.num_pages = int(meta.get("num_pages", 0))
+                    self.pdf_path = meta.get("pdf_path", self.pdf_path)
+                except Exception:
+                    embeddings = None  # cache rusak -> rebuild
+
+            if embeddings is None:
                 # --- rebuild dari PDF ---
                 pdf = Path(self.pdf_path)
                 if not pdf.exists():
@@ -182,31 +150,23 @@ class RagStore:
                 with pymupdf.open(str(pdf)) as d:
                     self.num_pages = len(d)
 
-                chunks = make_chunks(pages, chunk_size=CHUNK_SIZE, overlap=CHUNK_OVERLAP)
-                texts = [c["text"] for c in chunks]
+                self.chunks = make_chunks(pages, chunk_size=CHUNK_SIZE, overlap=CHUNK_OVERLAP)
+                texts = [c["text"] for c in self.chunks]
                 embeddings = embed_texts(texts, api_url=self.api_url, batch_size=EMBED_BATCH)
+                # simpan cache sebelum normalisasi? simpan mentah, normalisasi saat load
                 np.save(str(emb_file), embeddings)
-                chunk_file.write_text(json.dumps(chunks, ensure_ascii=False), encoding="utf-8")
+                chunk_file.write_text(json.dumps(self.chunks, ensure_ascii=False), encoding="utf-8")
                 meta_file.write_text(
                     json.dumps({"num_pages": self.num_pages, "pdf_path": str(pdf), "dimension": int(embeddings.shape[1])}),
                     encoding="utf-8",
                 )
-            else:
-                chunks, embeddings, meta = cached
-                self.num_pages = int(meta.get("num_pages", 0))
-                self.pdf_path = meta.get("pdf_path", self.pdf_path)
+                self.dimension = int(embeddings.shape[1])
 
-            self.chunks = chunks
-            self.dimension = int(embeddings.shape[1])
-
-            # --- sinkron ke Qdrant ---
-            count = self._collection_count()
-            if cached is not None and not force and count == len(chunks):
-                pass  # Qdrant sudah sinkron, tak perlu upsert
-            else:
-                self._ensure_collection(self.dimension, recreate=True)
-                self._upsert(embeddings)
-
+            self.index = _build_faiss(embeddings)
+            try:
+                faiss.write_index(self.index, str(index_file))
+            except Exception:
+                pass
             self._built = True
             return self.stats()
 
@@ -215,16 +175,13 @@ class RagStore:
             self.build()
 
     def stats(self) -> dict:
-        count = self._collection_count() if self._built else 0
         return {
             "pdf_path": str(self.pdf_path),
             "num_pages": self.num_pages,
             "num_chunks": len(self.chunks),
             "dimension": self.dimension,
-            "indexed_vectors": count if count is not None else 0,
+            "indexed_vectors": int(self.index.ntotal) if self.index is not None else 0,
             "embed_api": self.api_url,
-            "qdrant": QDRANT_URL or QDRANT_PATH,
-            "collection": self.collection,
             "built": self._built,
         }
 
@@ -232,28 +189,21 @@ class RagStore:
         if not query or not query.strip():
             raise ValueError("query tidak boleh kosong.")
         self.ensure_built()
-        total = self._collection_count() or 0
-        if total == 0:
-            return []
-        k = max(1, min(int(k), total, 10))
+        assert self.index is not None
+        k = max(1, min(int(k), int(self.index.ntotal), 10))
         qv = embed_texts([query.strip()], api_url=self.api_url, batch_size=1)
-        res = self._client_or_create().query_points(
-            self.collection, query=qv[0].tolist(), limit=k, with_payload=True
-        )
+        faiss.normalize_L2(qv)
+        scores, ids = self.index.search(qv, k)
         results: list[dict] = []
-        for pt in res.points:
-            payload = pt.payload or {}
-            results.append({"text": payload.get("text", ""), "page": payload.get("page", 0), "score": float(pt.score)})
+        for score, idx in zip(scores[0].tolist(), ids[0].tolist()):
+            if idx < 0 or idx >= len(self.chunks):
+                continue
+            item = self.chunks[idx]
+            results.append({"text": item["text"], "page": item["page"], "score": float(score)})
         return results
 
     def health(self) -> dict:
         out: dict = {"rag_built": self._built}
-        try:
-            self._client_or_create().get_collections()
-            out["qdrant_ok"] = True
-        except Exception as e:
-            out["qdrant_ok"] = False
-            out["qdrant_error"] = str(e)
         try:
             r = requests.get(self.api_url.replace("/v1/embeddings", "/v1/models"), timeout=5)
             out["embed_api_ok"] = r.status_code == 200
@@ -277,15 +227,12 @@ def _cli() -> None:
     parser.add_argument("--force", action="store_true", help="embed ulang dari nol, abaikan cache")
     parser.add_argument("--test", default="", help='uji retrieval setelah build, contoh: --test "fault location"')
     parser.add_argument("--api-url", default="", help="endpoint embedding (default dari EMBED_API_URL)")
-    parser.add_argument("--collection", default="", help="nama collection Qdrant (default dari QDRANT_COLLECTION)")
     args = parser.parse_args()
 
     store = RagStore()
     store.pdf_path = args.pdf
     if args.api_url:
         store.api_url = args.api_url
-    if args.collection:
-        store.collection = args.collection
     stats = store.build(force=args.force)
     print(f"SELESAI: {stats['num_chunks']} chunks, {stats['num_pages']} halaman, "
           f"dimensi {stats['dimension']} [{stats['pdf_path']}]", flush=True)

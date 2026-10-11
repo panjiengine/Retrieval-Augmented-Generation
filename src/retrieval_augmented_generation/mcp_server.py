@@ -30,7 +30,7 @@ from .rag_store import RagStore
 mcp = _MCPServer(
     name="rag-jurnal-elektronika",
     title="RAG Jurnal Elektronika",
-    description="Retrieval-Augmented Generation dari jurnal electronics-15-04648.pdf via Qdrant + granite embeddings.",
+    description="Retrieval-Augmented Generation dari dokumen PDF via FAISS + embeddings.",
     instructions="Gunakan rag_search untuk mencari potongan jurnal yang relevan sebelum menjawab pertanyaan elektronika.",
 )
 
