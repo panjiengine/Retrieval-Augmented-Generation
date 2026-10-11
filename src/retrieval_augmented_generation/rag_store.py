@@ -276,10 +276,16 @@ def _cli() -> None:
     parser.add_argument("pdf", help='path PDF sumber, contoh: jurnal/new.pdf')
     parser.add_argument("--force", action="store_true", help="embed ulang dari nol, abaikan cache")
     parser.add_argument("--test", default="", help='uji retrieval setelah build, contoh: --test "fault location"')
+    parser.add_argument("--api-url", default="", help="endpoint embedding (default dari EMBED_API_URL)")
+    parser.add_argument("--collection", default="", help="nama collection Qdrant (default dari QDRANT_COLLECTION)")
     args = parser.parse_args()
 
     store = RagStore()
     store.pdf_path = args.pdf
+    if args.api_url:
+        store.api_url = args.api_url
+    if args.collection:
+        store.collection = args.collection
     stats = store.build(force=args.force)
     print(f"SELESAI: {stats['num_chunks']} chunks, {stats['num_pages']} halaman, "
           f"dimensi {stats['dimension']} [{stats['pdf_path']}]", flush=True)

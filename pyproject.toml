@@ -12,7 +12,7 @@ dependencies = [
     "pymupdf>=1.28.2",
     "pyngrok>=8.1.2",
     "python-dotenv>=1.2.4",
-    "qdrant-client>=1.19.1",
+    "qdrant-client~=1.15.0",
     "requests>=2.34.2",
 ]
 
