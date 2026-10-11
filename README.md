@@ -79,6 +79,37 @@ Endpoint MCP ada di `<url-ngrok>/mcp`, contoh config client
 Hasil embedding di-cache di `.rag_cache/` (berdasarkan hash path + mtime PDF),
 jadi startup berikutnya instan selama PDF tidak berubah.
 
+## Ganti Dokumen / Re-embed
+
+Satu MCP server menyajikan satu PDF. Untuk memakai dokumen baru:
+
+```bash
+# 1. Taruh PDF baru, lalu bangun vector DB-nya (+ uji retrieval)
+uv run python -m retrieval_augmented_generation.rag_store "jurnal/dokumen-baru.pdf" \
+  --test "contoh pertanyaan"
+
+# 2. Restart MCP server dengan PDF baru
+PDF_PATH="jurnal/dokumen-baru.pdf" \
+  uv run python -m retrieval_augmented_generation.mcp_server --http --port 8000
+```
+
+Opsi build:
+
+```bash
+# Embed ulang dari nol (abaikan cache) — wajib jika PDF direvisi atau
+# setting chunk diubah
+uv run python -m retrieval_augmented_generation.rag_store "jurnal/dokumen.pdf" --force
+
+# Pakai server embedding lain (mis. model berbeda di port lain)
+uv run python -m retrieval_augmented_generation.rag_store "jurnal/dokumen.pdf" \
+  --api-url http://127.0.0.1:8081/v1/embeddings --test "contoh pertanyaan"
+```
+
+> Catatan: tiap kombinasi PDF + model embedding punya cache sendiri, jadi
+> DB lama tidak tertimpa. Tapi query harus di-embed dengan **model yang sama**
+> seperti saat build — samakan `EMBED_API_URL` MCP server dengan `--api-url`
+> saat build.
+
 ## Struktur
 
 ```
