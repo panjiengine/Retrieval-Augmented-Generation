@@ -4,8 +4,8 @@ Template **Retrieval-Augmented Generation (RAG)** dari dokumen PDF yang
 diekspos sebagai **MCP server**. Bisa dipakai lokal (stdio) maupun publik
 via **ngrok** (Streamable HTTP) agar bisa diakses dari mana saja.
 
-Pipeline: PDF → ekstrak teks → chunk → embeddings → index **FAISS**
-(cosine similarity via inner product ternormalisasi).
+Pipeline: PDF → ekstrak teks → chunk → embeddings → index **Qdrant**
+(cosine similarity, mode lokal persisten tanpa server terpisah).
 
 ## Prasyarat
 
@@ -73,6 +73,9 @@ Endpoint MCP ada di `<url-ngrok>/mcp`, contoh config client
 | `CHUNK_SIZE` / `CHUNK_OVERLAP` | `1000` / `150` | Ukuran chunk & overlap karakter |
 | `EMBED_BATCH` | `16` | Ukuran batch request embedding |
 | `RAG_CACHE_DIR` | `.rag_cache` | Lokasi cache chunks + embeddings |
+| `QDRANT_PATH` | `.qdrant` | Storage Qdrant lokal (abaikan jika `QDRANT_URL` diisi) |
+| `QDRANT_URL` | — | URL server Qdrant, contoh `http://localhost:6333` (opsional) |
+| `QDRANT_COLLECTION` | `rag-docs` | Nama collection |
 | `MCP_PORT` / `MCP_PATH` | `8000` / `/mcp` | Port & path HTTP |
 | `NGROK_AUTHTOKEN` / `NGROK_DOMAIN` | — | Token & domain reservasi ngrok |
 
