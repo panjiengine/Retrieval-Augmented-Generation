@@ -1,0 +1,15 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "rag-lokal": {
+      "type": "local",
+      "command": ["uv", "run", "python", "-m", "retrieval_augmented_generation.mcp_server"],
+      "enabled": true
+    },
+    "rag-publik-contoh": {
+      "type": "remote",
+      "url": "https://alive-set-crappie.ngrok-free.app/mcp",
+      "enabled": false
+    }
+  }
+}
