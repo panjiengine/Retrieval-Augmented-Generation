@@ -1,7 +1,7 @@
 [project]
 name = "retrieval-augmented-generation"
 version = "0.1.0"
-description = "Add your description here"
+description = "Retrieval-Augmented Generation over PDF documents, exposed as a Model Context Protocol (MCP) server"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
